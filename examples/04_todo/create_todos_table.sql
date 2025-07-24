@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS todos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  finished INTEGER CHECK(finished IN (1))
+);

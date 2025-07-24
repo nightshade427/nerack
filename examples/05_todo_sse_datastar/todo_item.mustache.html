@@ -1,0 +1,10 @@
+<div id="todo_{{id}}">
+  {{^finished}}
+    <input type="checkbox" data-on:click__prevent="@patch('{{url:patch:todo:finished=1}}')">
+  {{/finished}}
+  {{#finished}}
+    <input type="checkbox" checked data-on:click__prevent="@patch('{{url:patch:todo}}')">
+  {{/finished}}
+  {{title}}
+  <button data-on:click="@delete('{{url:delete:todo}}')">delete</button>
+</div>

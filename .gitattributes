@@ -1,0 +1,9 @@
+examples/** linguist-documentation=false linguist-vendored=false
+*.sql linguist-detectable=true
+*.sql linguist-language=SQL
+*.c linguist-detectable=true
+*.c linguist-language=C
+*.html linguist-detectable=true
+*.html linguist-language=HTML
+*.mu linguist-language=Markdown
+*.micron linguist-language=Markdown

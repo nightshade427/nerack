@@ -1,0 +1,17 @@
+INSERT INTO pokemons(name, sprite) VALUES
+  ('bulbasaur',  'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/1.png'),
+  ('charmander', 'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/4.png'),
+  ('squirtle',   'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/7.png'),
+  ('caterpie',   'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/10.png'),
+  ('pidgey',     'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/16.png'),
+  ('pikachu',    'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/25.png'),
+  ('jigglypuff', 'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/39.png'),
+  ('meowth',     'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/52.png'),
+  ('psyduck',    'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/54.png'),
+  ('machop',     'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/66.png'),
+  ('magnemite',  'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/81.png'),
+  ('gastly',     'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/92.png'),
+  ('onix',       'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/95.png'),
+  ('voltorb',    'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/100.png'),
+  ('eevee',      'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/133.png'),
+  ('snorlax',    'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/143.png');
