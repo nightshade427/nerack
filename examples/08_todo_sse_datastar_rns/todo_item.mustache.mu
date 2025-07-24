@@ -1,0 +1,1 @@
+{{^finished}}`[mark done`{{url:rns_todo}}`{{method:patch}}|finished=1]{{/finished}}{{#finished}}`[mark undone`{{url:rns_todo}}`{{method:patch}}]{{/finished}}  {{title}}  `[delete`{{url:rns_todo}}`{{method:delete}}]

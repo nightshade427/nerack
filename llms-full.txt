@@ -1,0 +1,403 @@
+# Nerack: reference for writing apps
+
+Nerack is a declarative, protocol-agnostic framework for asynchronous networking applications in C23, built around self-contained systems. An app is a set of modules; each module declares resources, databases, tasks, and events whose pipelines (ordered lists of steps) turn a request into a response. This file is complete: everything needed to write a Nerack app is here. Read Preferred style, Syntax, and Gotchas before writing code; use Signatures for exact field names.
+
+## Mental model
+
+- A module is any `.c` file containing `module(name){...}` (`todos/todos.c` declares `module(todos)`). It runs once at boot and registers declarations; Nerack finds modules by scanning the project.
+- A module body holds `http()`/`rns()` resources, `<engine>()` databases, `task()`, `publish()`/`subscribe()`, `context()`, and `error()`/`repair()` handlers. There is no module-level middleware; cross-cutting steps go in a resource's `.all`.
+- A request runs the resource's `.all` steps, then the pipeline for its verb. Each step completes before the next starts; a step that cannot deliver raises an error instead. A pipeline that ends without a response step returns an empty success (HTTP: empty 200).
+- Context is a scoped key/value store that lives for one pipeline run (a request, a task, or an event delivery). Scopes: `input:x` (raw parameters), `error:x` (errors), and bare names (app scope). `input()` validates `input:x` and promotes it to app scope.
+- A value is a string, a table of records (query and fetch results), or an opaque C pointer set with `set_value()`. `{{key}}` interpolates strings and tables into SQL, templates, URLs, and headers; opaque values are invisible to them.
+- Steps read their inputs from context by key and write their outputs to context by key. Assets (SQL, templates) are context keys too: `sqlite_query({"todos_db", "get_todos", ...})` runs the SQL stored under `get_todos`.
+- The core has no notion of HTTP. Protocols are modules: `http.h` (HTTP) and `rns.h` (Reticulum). One app can serve several protocols, sharing databases, tasks, and events.
+- C23 with clang blocks: `nullptr`, `bool`, `constexpr`, `auto`, `[[attributes]]`, designated initializers, `^(){...}`. App code never calls `malloc`/`free` or manages threads or locks.
+
+## Preferred style
+
+Write apps the Nerack way, not the way most frameworks do:
+- Hypermedia first, on every protocol. Render on the server and send HTML (http) or Micron (rns). Forms use POST-redirect-GET; live updates are `datastar()` patches over a resource's `.sse` channel. Do not build JSON endpoints plus client-side rendering unless the consumer is an API client or a single-page app's backend-for-frontend.
+- One module per domain slice (`todos`, `activity`), owning its databases, SQL, templates, resources, tasks, and events. Modules communicate only through events (`publish`/`emit`/`subscribe`), never by reading each other's databases or assets.
+- Logic lives in steps: SQL in `.sql` assets, markup in templates, and only shaping or decisions in `run()`. Prefer a declarative step over C whenever one exists.
+- A pipeline may cross protocols (an `rns()` POST can `datastar()`-patch browsers on an `http()` `.sse` channel) and mix databases (a shared Postgres for auth alongside a per-user SQLite via `{{user_id}}` in the connection string).
+
+## Conventions
+
+Not required, but use them: they make pipelines self-describing.
+- Context key suffixes: `_s` for a rendered string (`html("todos", "todos_s")`), `_data` for a table result (`"todos_data"`), `_d` for a single-row table (a `RETURNING` row, or a `.map_context_key` row). Validated inputs and flags are bare (`title`, `is_urgent`).
+- Database keys end in `_db` (`todos_db`). SQL asset names are verbs (`get_todos`, `create_todo`, `create_todos_table`); template names are nouns (`todos`, `todo_row`).
+- When one path is served over both protocols, prefix resource names with the protocol (`http_room`, `rns_room`).
+- Project layout:
+```
+.
+├── main.c                      # module(main): shared resources such as home
+├── layout.mustache.html        # root assets are shared by every module
+├── todos/
+│   ├── todos.c                 # module(todos)
+│   ├── todos.mustache.html     # module assets are private to todos
+│   ├── todos.mustache.mu       # same key, Micron engine, for rns()
+│   ├── create_todos_table.sql
+│   └── get_todos.sql
+├── public/                     # served directly; reference with {{asset:file}}
+└── vendor/                     # third-party C sources, compiled and linked with the app
+```
+
+## Syntax
+
+- Every call is a macro over a struct literal. Leading values are positional in struct-field order (see Signatures); the rest are named. `sqlite_query({"todos_db","get_todos","todos_data"})` equals `sqlite_query({.database_key="todos_db", .query="get_todos", .context_key="todos_data"})`. Name anything past the obvious leading fields.
+- List steps take one `{...}` item per entry, and multiple items run concurrently: `input`, `sqlite_query` (any `*_query`), `http_fetch`, `http_headers`, `http_cookies`. Write `input({"title", not_empty_input})`, never `input("title", not_empty_input)`.
+- All other steps take their fields directly: `html("todos", "todos_s")`, `http_response("todos_s")`, `datastar("room", .target = "#messages")`.
+- A pipeline is a brace list of steps separated by commas: `.get = { step, step, step }`. Module-level declarations are statements ending in `;`.
+- Handler lists are `{code, {steps}}` entries: `.errors = {{http_bad_request, {http_reroute("todos")}}}`. Module-level: `error(http_not_found, {steps});`.
+- Every step also accepts `.if_context_key`, `.unless_context_key`, `.map`, `.map_context_key` (per item for list steps).
+
+## Signatures
+
+Exact fields in positional order. `{...}` marks a nested list; `, ...` marks a list step.
+```c
+// nerack.h: core
+module(name){ ... }
+context(.key, .value);                                        // seed a context key from a string literal
+task(.task_key, {.steps}, .errors, .repairs, .cron, .accepts = {"key", ...});
+error(.code, {.steps});                                       // module-scoped handler
+repair(.code, {.steps});
+input({.context_key, .regex, .error_message, .optional, .default_value}, ...)
+join(.parent_context_key, .parent_field_key, .child_context_key, .child_field_key, .parent_child_join_key)
+run(.icall = ^(){ ... })  |  run(.call = fn)                 // icall is positional: run(^(){ ... })
+run_worker(.icall)  |  run_worker(.call = fn)
+run_task(.key)
+nest({.steps})
+
+// sqlite.h (other engines: postgres.h, mysql.h, redis.h, duckdb.h, same shape)
+sqlite(.database_key, .connection, {.migrations}, {.seeds});
+sqlite_query({.database_key, .query, .context_key, .error_on_empty}, ...)
+
+// http.h
+http(.name, .url, .mime, .errors, .repairs, .all, .get, .post, .put, .patch, .delete, .sse = {.channel, {.steps}});
+html(.template_key, .context_key)                             // Mustache
+markdown(.template_key, .context_key)                         // Markdown with Mustache
+json(.template_key, .context_key)                             // serialize table/record at template_key
+http_response(.context_key, .status, .mime)
+http_fetch({.method, .url, .context_key, .json_table_key, .json, .text, .headers = {{"Name", "value"}, ...}}, ...)
+http_sse(.channel, .event, .comment, .data = {"line", ...})
+http_headers({.key, .value}, ...)
+http_cookies({.key, .value}, {.key[, .value]}, ...)            // first pair is the cookie, the rest attributes
+http_redirect(.key)                                           // resource name
+http_reroute(.key)
+
+// rns.h
+rns(.name, .url, .errors, .repairs, .all, .get, .post, .put, .patch, .delete);
+micron(.template_key, .context_key)
+rns_response(.context_key)
+rns_reroute(.key)
+rns_identity()
+
+// pubsub.h
+publish(.event, .with = {"key", ...});
+subscribe(.event, {.steps}, .errors, .repairs);
+emit(.key)
+
+// dispatch.h
+dispatch(.key)
+
+// datastar.h: name every field after .channel (the second positional field is .elements)
+datastar(.channel, .elements, .javascript, .target, .signals, .mode)
+
+// cookie_auth.h
+cookie_logged_in()  cookie_session()  cookie_login()  cookie_logout()  cookie_signup()
+
+// htmx.h, tailwind.h, daisyui.h: no steps; partials {{> htmx}} {{> datastar}} {{> tailwind}} {{> daisyui}}
+```
+
+## Imperative API (inside run, run_worker, and .call functions)
+
+```c
+typedef char const * const string;
+typedef struct { int const code; string const message; } error;
+// table_handle, record_handle: opaque handles
+
+void*  get(string key);                       // nullptr if absent; caller knows the type
+void   set_string(string key, string value);
+void   set_table(string key, table_handle t);
+void   set_value(string key, void const * p); // opaque; invisible to templates and SQL
+bool   has(string key);
+void   format(string key, string tmpl);       // resolve {{...}} against context, write to key
+
+void*  alloc(size_t bytes);                   // arena, freed when the pipeline run ends
+void   defer_free(void const * p);            // free a library-owned pointer at run end
+
+void   error_set(string key, error e);        // raise; nearest error/repair pipeline runs
+error  error_get(string key);
+bool   error_has(string key);
+
+table_handle  table_new();
+size_t        table_length(table_handle t);
+record_handle table_get(table_handle t, size_t i);   // nullptr if out of range
+void          table_add(table_handle t, record_handle r);
+void          table_remove(table_handle t, record_handle r);
+void          table_remove_at(table_handle t, size_t i);
+
+record_handle record_new();
+void*         record_get(record_handle r, string key);   // nullptr if absent
+void          record_set_string(record_handle r, string key, string value);
+void          record_set_table(record_handle r, string key, table_handle t);
+void          record_set_value(record_handle r, string key, void const * p);
+void          record_remove(record_handle r, string key);
+```
+Third-party C goes in `vendor/` and is called from `run_worker()`; register its allocations with `defer_free()`.
+
+## Step semantics
+
+- `input` validates query, form, JSON-body (top-level keys), and URL parameters. On success each value is promoted to app scope; on failure it writes `error:name` and raises `err_invalid` (400). All items validate before the error fires, so every field error surfaces together. For checks beyond regex (uniqueness, cross-field), follow it with a query and a `run()` that calls `error_set()`.
+- `*_query` runs the SQL stored under `.query`. `{{x}}` is bound as a parameter, never spliced; an absent `{{x}}` binds NULL. The result is always a table, even for one row; omit `.context_key` when unused. `.error_on_empty` raises `err_not_found` (404) on zero rows affected or returned. Transactions: `BEGIN`/`COMMIT` in the SQL.
+- `join` nests each parent record's matching children under a new field (default: the child table's key). `{blog:[{id}], comments:[{blog_id}]}` becomes `{blog:[{id, comments:[...]}]}`.
+- `run` executes short, non-blocking C on the reactor. `run_worker` executes on the shared thread pool for blocking or CPU-bound work and resumes the pipeline on the original reactor.
+- `nest` groups steps so one `.if_context_key`/`.unless_context_key` covers them all.
+- `run_task` runs a task inline; `dispatch` enqueues it as a durable background job and continues immediately.
+- `http_fetch` makes outbound requests; JSON responses parse into tables and records, text into strings. `.json` is a literal body (interpolates); `.json_table_key` names a context value serialized as the body; `.text` names a context string sent as the body.
+- `html`/`markdown`/`micron` render the template stored under `.template_key` into `.context_key`. `json` serializes the table or record under its first key.
+- `http_response` sends a context value; `.status` defaults to `http_ok`, `.mime` to the resource's `.mime`.
+- `http_redirect` returns a 302; `http_reroute`/`rns_reroute` re-enter the router in process and run the target's GET pipeline. Both fill the target's `:params` from context by matching key names.
+- `http_sse` broadcasts to every client on `.channel`, or to the requester when `.channel` is omitted. Each call writes its components straight to the connection, so consecutive calls build one record.
+- `datastar` patches the HTML under `.elements` into `.target` (id or CSS selector, interpolates) for every client on `.channel`, using `.mode` (default `outer_mode`; `remove_mode` needs no `.elements`). `.signals` names a context value merged into the client store; `.javascript` runs on the client.
+- `.map = "table"` runs the step once per row, all rows concurrently, with the row's fields in scope as bare `{{field}}`; with a result key, outputs collect into a table aligned to the input. `.map_context_key = "k"` also exposes the row as the single-row table `k`, for fields that take a table key (`.json_table_key`, `json()`).
+- `.if_context_key = "k"` runs the step only when `k` is present; `.unless_context_key` only when absent. Works with any key, including `is_htmx`, `is_datastar`, and flags set in `run()`.
+
+## Resources
+
+- `http()` declares a resource, not a route. Its name is used by `{{url:name}}`, `{{sse:name}}`, `http_redirect()`, and `http_reroute()`. An exact path beats a parameterized one regardless of order. The verb comes from the HTTP method, or from a `_method` field on a POST. `.mime` defaults to `mime_html`.
+- `.sse = {"channel:{{interp}}", {steps}}` opens a persistent SSE channel; browsers connect with `{{sse:name}}` (a GET). The steps run on connect, after `.all`. `.sse = {"room"}` with no steps just subscribes.
+- `rns()` has the same fields as `http()` except `.mime` and `.sse`. Pages are Micron, rendered by `micron()`. `rns_identity()` (in `.all`) resolves the peer, sets `user_id`, and loads `user`.
+- Resource names form one namespace across protocols.
+
+## Assets
+
+Every non-`.c` file is an asset, keyed by its basename up to the first dot: `get_todos.sql` → `get_todos`, `todos.mustache.html` → `todos`. The middle segment names the engine: `html()` reads `<key>.mustache.html`, `markdown()` reads `<key>.mustache.md`, `micron()` reads `<key>.mustache.mu`; one key can back several engines. `{{> partial}}` and `{{< parent}}` resolve against the engine rendering the enclosing template. A module sees every asset from its own folder up to the project root, never sideways: root assets are shared, a module folder's assets are private. `context("key", "value")` seeds a key from a string instead of a file. `public/` files are served directly and referenced with `{{asset:file}}`.
+
+## Templates
+
+Mustache, auto-escaped. The full base spec except dot notation:
+`{{x}}` escaped · `{{{x}}}`/`{{&x}}` raw · `{{#x}}..{{/x}}` section/loop · `{{^x}}..{{/x}}` inverted · `{{! c }}` comment · `{{=<% %>=}}` delimiters · `{{> name}}` partial · `{{< parent}}{{$block}}override{{/block}}{{/parent}}` inheritance (any template with a `{{$block}}default{{/block}}` can be a parent; layouts are built this way).
+A missing, `nullptr`, or opaque value renders empty and its section is falsy; only the opaque case is logged.
+
+Helpers (`{{helper:args}}`, colon-separated; each arg is a literal or a context key):
+- `{{url:name}}`: resource URL; `:params` fill from the current scope by key name, so it works per row inside a section. `{{url:todos:filter=done}}` → `/todos?filter=done`.
+- `{{method:verb}}`: hidden `_method` field so a POST form reaches `put`/`patch`/`delete` (`<input type='hidden' name='_method' value='delete'>`). In Micron it renders a `_method=<verb>` link field and is needed for every non-GET verb, `post` included: `` `[add`{{url:todos}}`{{method:post}}|title] ``. Datastar and htmx send the real method and need no helper.
+- `{{sse:name}}`: `{{url:name}}` plus `_method=sse`, the GET that connects to `.sse`.
+- `{{input:field}}` raw parameter for repopulating forms · `{{error:field}}` section, truthy on error · `{{error_message:field}}` · `{{error_code:field}}` · `{{precision:field:N}}` N decimals · `{{asset:file}}` cache-busted `public/` URL.
+- Datastar attributes use the colon form: `data-bind:title`, `data-on:click="@post('{{url:todos}}')"`, `data-init="@get('{{sse:todos}}')"`.
+
+## Errors & repairs
+
+Lookup by code: the resource's (or task's, or subscriber's) `.errors`/`.repairs` first, then the module's `error()`/`repair()`. Repairs resolve before errors. A repair fixes context and resumes at the step after the failure; an error responds and ends the run. Unhandled errors render a context template named after the code (`404`) if present, else the message as text/plain with that status. Core codes: `err_invalid` 400, `err_unauthorized` 401, `err_not_found` 404, `err_internal` 500; `http.h` aliases `http_bad_request`, `http_not_authorized`, `http_not_found`, `http_error`. Custom: `#define err_quota 723`.
+
+## Events and tasks
+
+- Events (`pubsub.h`) are durable: undelivered events replay after a crash. `publish` declares the event and the keys it carries; `emit` fires it; each `subscribe` in any module receives those keys. Adding a subscriber never changes the publisher.
+- Tasks are named, reusable pipelines. `run_task` runs one inline. `dispatch` (`dispatch.h`) runs it durably on the task reactor: checkpointed after each step, resumed after a crash. `.cron` runs it on a schedule with no caller. `.accepts` lists caller keys copied into the task's context.
+
+## Bundled modules
+
+- `htmx.h`: `{{> htmx}}` partial; sets `is_htmx` on `HX-Request`.
+- `datastar.h`: `{{> datastar}}` partial and `datastar()`. Sets `is_datastar` on its requests and puts their signals (JSON body, or the `datastar` query parameter on GET) into `input:` for `input()`.
+- `tailwind.h`, `daisyui.h`: `{{> tailwind}}`, `{{> daisyui}}` in `<head>`; classes used in templates compile automatically.
+- `cookie_auth.h`: including it mounts `/login`, `/logout`, `/signup` and a login page. `cookie_logged_in()` gates: redirects through login if the `user_id` cookie is missing, else promotes `user_id`; it does not load the user. `cookie_session()` loads `user` (`{{#user}}{{short_name}}{{/user}}`). Use either or both, in `.all` or a verb. `cookie_login()`/`cookie_logout()`/`cookie_signup()` are the actions, for custom auth resources. Logout is a POST form to `{{url:logout}}`.
+- Databases: `sqlite` is bundled; other engines are modules of the same shape. Migrations and seeds are forward-only and index-based: each runs once, in array order, tracked in `nerack_meta`; append new ones at the end. Interpolation in `.connection` makes a database multi-tenant; connections are pooled.
+
+## Constants
+
+Verbs: `http_get http_post http_put http_patch http_delete`.
+Status: `http_ok`200 `http_created`201 `http_redirected`302 `http_bad_request`400 `http_not_authorized`401 `http_not_found`404 `http_error`500.
+Mime: `mime_html mime_text mime_event_stream mime_json mime_javascript`.
+Datastar modes: `outer_mode inner_mode replace_mode prepend_mode append_mode before_mode after_mode remove_mode`.
+Validators (`nerack.h`): `not_empty_input alpha_input alphanumeric_input slug_input integer_input positive_integer_input float_input percent_input email_input uuid_input user_input date_input time_input datetime_input zip_input phone_input cron_input token_input base64_input bool_input yes_no_input on_off_input`; (`http.h`): `no_html_input url_input ipv4_input hex_color_input`. Custom: `#define sku_input "^[A-Z]{3}-[0-9]{4}$"`.
+
+## Gotchas
+
+- List steps need inner braces: `input({"title", not_empty_input})`, `sqlite_query({...})`, `http_fetch({...})`.
+- No dot notation in templates: `{{#a}}{{b}}{{/a}}`, never `{{a.b}}`.
+- Regex is POSIX extended: `[0-9]` and `[[:space:]]`, never `\d` or `\s`.
+- Context keys are global to the pipeline run: give every output a distinct key, or a later step overwrites it.
+- The template key and the output key differ: `html("todos", "todos_s")`, never `html("todos", "todos")`.
+- Includes: `html`/`markdown`/`json`/`http_*` need `http.h`; `micron`/`rns_*` need `rns.h`; `publish`/`subscribe`/`emit` need `pubsub.h`; `dispatch` needs `dispatch.h`; `datastar` needs `datastar.h`.
+- `http_reroute()`/`rns_reroute()` run the target's GET pipeline, not the current verb.
+- HTML forms reach `put`/`patch`/`delete` only with `{{method:verb}}`; Micron needs it for every non-GET verb.
+- State-changing actions (logout, delete) are POST forms or Datastar actions, never plain links.
+- A query result is always a table; enter it with `{{#todo_data}}...{{/todo_data}}` even for one row.
+- `run()` runs on the reactor: keep it short and non-blocking; anything blocking goes in `run_worker()`.
+- No `malloc`/`free`, threads, or locks in app code; use `alloc()` and `defer_free()`.
+
+## Framework-handled (do not reimplement)
+
+Per-run arena memory and bounds-checked structures (a missing key returns `nullptr`); SQL injection (bound parameters), XSS (auto-escaping), and CSRF (same-origin checks via `Sec-Fetch-Site`/`Origin`, `SameSite=Lax` cookies; no tokens or hidden fields); concurrency, threads, locks, and connection pooling; durable events and tasks; OpenTelemetry spans, logs, and errors per step; compilation, hot reload, and HMR.
+
+## Recipes
+
+```c
+// Form with validation: POST-redirect-GET; on failure re-render GET, form repopulates from input:/error:
+http("todos", "/todos",
+  .get  = {sqlite_query({"todos_db", "get_todos", "todos_data"}), html("todos", "todos_s"), http_response("todos_s")},
+  .post = {input({"title", not_empty_input, "cannot be empty"}), sqlite_query({"todos_db", "create_todo"}), http_redirect("todos")},
+  .errors = {{http_bad_request, {http_reroute("todos")}}}
+);
+
+// Custom validation beyond regex
+input({"username", user_input, "3-32 letters or digits"}),
+sqlite_query({"users_db", "find_username", "existing_data"}),
+run(^(){ if (table_length(get("existing_data")) > 0) error_set("username", (error){http_bad_request, "already taken"}); }),
+
+// Auth-gated resource with a per-user database
+sqlite("notes_db", "file:{{user_id}}_notes.db?mode=rwc", {"create_notes_table"});
+http("notes", "/notes", .all = {cookie_logged_in(), cookie_session()}, .get = { ... });
+
+// htmx: fragment for htmx requests, full page otherwise
+html("todos_fragment", "page_s", .if_context_key = "is_htmx"),
+html("todos_page", "page_s", .unless_context_key = "is_htmx"),
+http_response("page_s")
+
+// JSON for an API client or SPA backend-for-frontend
+http("api_todos", "/api/todos", .mime = mime_json,
+  .get = {sqlite_query({"todos_db", "get_todos", "todos_data"}), json("todos_data", "todos_s"), http_response("todos_s")}
+);
+
+// Concurrent outbound calls, then a durable background job
+http_fetch({http_get, "https://api.weather.dev/now", "weather_data"}, {http_get, "https://api.quotes.dev/random", "quote_data"}),
+dispatch("notify_new_todo"),
+task("notify_new_todo", {http_fetch({http_post, "https://api.push.dev/notify", .json = "{\"text\":\"{{title}}\"}"})}, .accepts = {"title"});
+task("daily_digest", {sqlite_query({"todos_db", "digest"})}, .cron = "0 8 * * *");
+
+// Blocking third-party C on the thread pool
+run_worker(^(){ char * const out = cmark_markdown_to_html(get("md"), strlen(get("md")), 0); defer_free(out); set_string("md_s", out); })
+```
+
+## Example: modules and events
+
+```c
+// todos/get_todos.sql    select id, title from todos;
+// todos/get_todo.sql     select id, title from todos where id = {{id}};
+// todos/get_comments.sql select id, todo_id, body from comments where todo_id = {{id}};
+// todos/create_todo.sql  insert into todos(title) values({{title}});
+// todos/todos.mustache.html
+//   {{< layout}}{{$body}}
+//     <form method='post' action='{{url:todos}}'>
+//       <input name='title' value='{{input:title}}'>
+//       {{#error:title}}<span>{{error_message:title}}</span>{{/error:title}}
+//     </form>
+//     <ul>{{#todos_data}}<li><a href='{{url:todo}}'>{{title}}</a></li>{{/todos_data}}</ul>
+//   {{/body}}{{/layout}}
+
+// todos/todos.c
+#include <nerack.h>
+#include <http.h>
+#include <sqlite.h>
+#include <pubsub.h>
+
+module(todos){
+  sqlite("todos_db", "file:todos.db?mode=rwc", {"create_todos_table"}, {"seed_todos"});
+  publish("todo_created", .with = {"title"});
+
+  http("todos", "/todos",
+    .get = {
+      sqlite_query({"todos_db", "get_todos", "todos_data"}),
+      html("todos", "todos_s"),
+      http_response("todos_s")
+    },
+    .post = {
+      input({"title", not_empty_input, "cannot be empty"}),
+      sqlite_query({"todos_db", "create_todo"}),
+      emit("todo_created"),
+      http_redirect("todos")                                  // POST-redirect-GET
+    },
+    .errors = {{http_bad_request, {http_reroute("todos")}}}   // re-render GET; form repopulates from input:/error:
+  );
+
+  http("todo", "/todos/:id",
+    .all = {input({"id", positive_integer_input})},
+    .get = {
+      sqlite_query(                                           // both run concurrently
+        {"todos_db", "get_todo", "todo_data", .error_on_empty = true},
+        {"todos_db", "get_comments", "comments"}
+      ),
+      run(^(){                                                // shape data between steps
+        table_handle const c = get("comments");
+        if (table_length(c) > 10) set_string("is_popular", "1");   // template: {{#is_popular}}
+      }),
+      join("todo_data", "id", "comments", "todo_id"),
+      html("todo", "todo_s"),
+      http_response("todo_s")
+    }
+  );
+}
+
+// activity/activity.c: subscriber, no dependency on todos
+#include <nerack.h>
+#include <sqlite.h>
+#include <pubsub.h>
+
+module(activity){
+  sqlite("activity_db", "file:activity.db?mode=rwc", {"create_activity_table"});
+  subscribe("todo_created", {sqlite_query({"activity_db", "insert_activity"})});
+}
+```
+
+## Example: live, cross-protocol chat room
+
+A message posted from a browser (Datastar) or from an RNS peer (Micron) is stored once and appended live in every connected browser.
+```c
+// chat/create_messages_table.sql  CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL);
+// chat/get_messages.sql           select id, body from messages order by id;
+// chat/insert_message.sql         insert into messages(body) values({{body}}) returning id, body;
+// chat/message.mustache.html      {{#message_d}}<li id='message-{{id}}'>{{body}}</li>{{/message_d}}
+// chat/room.mustache.html
+//   {{< layout}}{{$body}}
+//     <ul id='messages' data-init="@get('{{sse:http_room}}')">
+//       {{#messages_data}}<li id='message-{{id}}'>{{body}}</li>{{/messages_data}}
+//     </ul>
+//     <input data-bind:body><button data-on:click="@post('{{url:http_room}}')">Send</button>
+//   {{/body}}{{/layout}}
+// chat/room.mustache.mu
+//   {{#messages_data}}{{body}}
+//   {{/messages_data}}
+//   `<body`>`[send`{{url:rns_room}}`{{method:post}}|body]
+
+// chat/chat.c
+#include <nerack.h>
+#include <http.h>
+#include <rns.h>
+#include <sqlite.h>
+#include <datastar.h>
+
+module(chat){
+  sqlite("chat_db", "file:chat.db?mode=rwc", {"create_messages_table"});
+
+  http("http_room", "/room",
+    .sse = {"room"},                                          // browsers listen here for patches
+    .get = {
+      sqlite_query({"chat_db", "get_messages", "messages_data"}),
+      html("room", "room_s"),
+      http_response("room_s")
+    },
+    .post = {                                                 // Datastar signals arrive in input:
+      input({"body", not_empty_input, "cannot be empty"}),
+      sqlite_query({"chat_db", "insert_message", "message_d", .error_on_empty = true}),
+      html("message", "message_s"),
+      datastar("room", .target = "#messages", .mode = append_mode, .elements = "message_s")
+    }                                                         // no response step: empty 200; the patch is the output
+  );
+
+  rns("rns_room", "/room",
+    .get = {
+      sqlite_query({"chat_db", "get_messages", "messages_data"}),
+      micron("room", "room_s"),
+      rns_response("room_s")
+    },
+    .post = {
+      input({"body", not_empty_input, "cannot be empty"}),
+      sqlite_query({"chat_db", "insert_message", "message_d", .error_on_empty = true}),
+      html("message", "message_s"),                           // render HTML for the browsers
+      datastar("room", .target = "#messages", .mode = append_mode, .elements = "message_s"),
+      rns_reroute("rns_room")                                 // and Micron back to the RNS peer
+    }
+  );
+}
+```
