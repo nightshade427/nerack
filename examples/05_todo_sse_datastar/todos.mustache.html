@@ -1,0 +1,16 @@
+{{< layout}}
+  {{$head}}
+   {{> datastar }}
+  {{/head}}
+  {{$body}}
+    <input type="text" placeholder="new todo" data-bind:title
+      data-on:keydown="evt.key === 'Enter' && @post('{{url:post:todos}}') && ($title = '');"
+    >
+    <button data-on:click="@post('{{url:post:todos}}') && ($title = '')">add</button>
+    <div id="todos" data-init="@get('{{url:events:todos}}')">
+      {{#todos_data}}
+        {{> todo_item}}
+      {{/todos_data}}
+    </div>
+  {{/body}}
+{{/layout}}
