@@ -1,0 +1,239 @@
+![Nerack C](./images/nerack_scene.png)
+
+## Why Nerack
+
+Nerack is a declarative, protocol-agnostic framework for asynchronous networking applications in C, built around self-contained systems. It ships as a single binary with everything bundled, for Linux and macOS.
+
+* **Self-contained systems:** each module owns everything for its slice of the app: databases, schemas, resources, templates, routines, and events. Modules communicate only through events, and the compiler enforces the boundaries.
+* **Memory, concurrency, and I/O managed by the framework:** application code does not call malloc/free or manage threads, mutexes, or locks.
+* **Reactor architecture:** tens of thousands of concurrent connections per core, flat memory per connection, no context-switch overhead, and low-cost long-lived connections like SSE.
+* **Protocols:** HTTP, RNS, NomadNet, Gemini, Finger, SMTP, or any other; one app can serve several at once. A single pipeline can even cross protocols: a message arriving over RNS can be pushed in real time over SSE to HTTP clients in the same chat room.
+* **Realtime Hypermedia:** Build realtime hypermedia applications even on protocols like RNS that lack its semantics: HTML or Micron over the wire, SSE, CQRS, Datastar, and HTMX. JSON is supported too, so Nerack also works well as a backend-for-frontend (BFF) for SPAs.
+* **Databases:** SQLite, Postgres, MySQL, Redis, DuckDB, or any other; multi-tenancy is built in, and one app can use several at once. A single pipeline can even mix databases and database types: a single Postgres database for authentication alongside a SQLite database per user for their data.
+* **Authentication:** cookie and session auth are bundled; WebAuthn, OTP, or any other.
+* **Durable tasks and events:** both are persisted. After a crash, incomplete tasks resume at the step where they stopped and undelivered events replay.
+* **Observability:** pipeline steps emit OpenTelemetry spans, logs, and errors automatically.
+* **Developer experience:** automatic compilation, hot code reloading, and an HMR feedback loop, with no build scripts. Write code and save.
+* **Bundled modules:** HTML, Markdown, and Micron templates; Datastar, HTMX, Tailwind, DaisyUI; HTTP, RNS, SQLite; pub/sub; background and cron tasks.
+
+---
+
+## Table of Contents
+* [Quick Start](#quick-start)
+* [Philosophy](#philosophy)
+* [Tooling](#tooling)
+  * [Development Environment](#development-environment)
+  * [Debugging](#debugging)
+  * [Testing](#testing)
+  * [Deployment](#deployment)
+  * [Observability](#observability)
+* [Built With](#built-with)
+* [License](#license)
+* **Documentation**
+  * [Guide](./GUIDE.md): build a todo app one concept at a time
+  * [Reference](./REFERENCE.md): full options for every step, helper, and field
+
+---
+
+## Quick Start
+
+Download the binary and run `nerack` in an empty directory; that directory is the project root. It starts the dev server on port 3000 with file watching, auto compilation, hot code reloading, and HMR.
+
+```bash
+mkdir myapp && cd myapp
+nerack
+```
+
+Create `hello_world.c` and `hello.mustache.txt` with the example below. Nerack watches for changes and hot-reloads on save. Edit them with your own editor or the web editor; see [Development Environment](#development-environment) for both.
+
+```c
+#include <nerack.h>
+#include <http.h>
+
+module(hello_world){
+  http("home", "/", .mime = mime_text,
+    .get = {
+      text("hello", "hello_s"),
+      http_response("hello_s")
+    }
+  );
+}
+```
+
+**`hello.mustache.txt`**
+```
+Hello, world
+```
+
+A module is any `.c` file declaring `module(name){...}`; `hello_world.c` declares the `hello_world` module. `http()` declares the `home` resource mapping `/` to a GET pipeline: `text()` renders the asset `hello.mustache.txt` into the context key `hello_s`, and `http_response()` sends it, as `text/plain` because of `.mime`. `http()` comes from `http.h`; the core itself has no notion of HTTP. See the [Guide](./GUIDE.md) for a step-by-step walkthrough.
+
+---
+
+## Philosophy
+
+An application is a data transformation: input arrives, is transformed, and leaves as output. Nerack arranges the work into pipelines: ordered lists of steps that turn a request into a response.
+
+### Steps
+
+Steps are the primitive; a pipeline is an ordered list of them. A step is declarative: it describes what should happen, not how. Each step is self-contained: it may run synchronously or asynchronously, but the pipeline treats it as a single synchronization point, and the next step starts only once it resolves. A step guarantees that when it finishes, context holds the values it promised; if it cannot, it raises an error instead, handled by an error or repair pipeline. Each step is its own OpenTelemetry span, logs itself, and counts its own performance.
+
+### Built on Standards
+
+The assets are standard formats: SQL, JSON, Markdown, HTML, CSS, JS, Micron. Business logic is plain C. The tooling is standard too: LLDB for debugging, clangd for editing, OpenTelemetry for observability.
+
+### Everything is a String
+
+The web is text: HTTP, RNS, Micron, HTML, Markdown, JSON, SQL. The pipeline context stores and passes data as strings. Strings are interpolated into SQL, templates, and URLs with `{{context_key}}`.
+
+### CLAD
+
+Four principles:
+
+* **(C)omposable:** small, independent steps chain into feature pipelines.
+* **(L)ocality of Behavior:** behavior is apparent from reading the code. SQL, templates, and logic for a feature live together, not spread across model, view, and controller trees.
+* **(A)utonomous:** each module owns its schemas, migrations, seeds, resources, UI, and logic, and the compiler enforces the boundaries.
+* **(D)omain Based:** each module owns one slice of the app. A `todos` module defines everything related to todos and nothing else.
+
+Inspired by:
+
+* [Data Oriented Design](https://youtu.be/rX0ItVEVjHc)
+* [A Philosophy of Software Design](https://youtu.be/bmSAYlu0NcY)
+* [CUPID](https://youtu.be/cyZDLjLuQ9g)
+* [Self-Contained Systems](https://youtu.be/Jjrencq8sUQ)
+* [Locality of Behavior](https://htmx.org/essays/locality-of-behaviour)
+
+---
+
+## Tooling
+
+### Development Environment
+
+Running `nerack` starts dev mode in the current directory, the project root. Module `.c` files and assets (SQL, HTML, and so on) live there, as shown in the [Guide](./GUIDE.md) and [Reference](./REFERENCE.md). On every start Nerack deletes `./dev`, compiles every module into it fresh, then watches for changes. Requests and errors print to the console. The dev server listens on port 3000; change it with `--port` or `PORT` (see [Configuration](./REFERENCE.md#configuration) for every setting and its default).
+```bash
+nerack
+```
+
+Saving a file recompiles what changed and hot-reloads it.
+
+Apps can be built with the web editor or your own editor. The two are not exclusive: mix and match freely.
+
+#### Web Editor
+The built-in web editor represents modules, resources, pipelines, and databases as graphical widgets instead of raw text, with a code editor for step bodies. It generates module `.c` files and assets into the project root; saving a change compiles and hot-reloads it like any other edit. A module/asset viewer shows what was generated, and a server console shows requests and errors.
+```
+http://localhost:3000/__dev__
+```
+
+#### Bring Your Own
+Nerack watches the project root regardless of editor. Edit `.c` files and assets with any tool; Nerack compiles and hot-reloads on save. `nerack lsp` is a language server set up for the project; point your editor's LSP client at it.
+```bash
+nerack lsp
+```
+
+### Debugging
+The interactive debugger is pipeline-aware: halt on a step, step through execution, and inspect the full context, including nested tables and records.
+```bash
+nerack debug
+```
+
+### Testing
+Test an app from the outside, over its protocols. Start it against a throwaway data directory, so every run begins with fresh databases (migrations and seeds applied), then drive it with any HTTP testing tool: [Hurl](https://hurl.dev) for request and response checks, [Playwright](https://playwright.dev) for real-browser flows such as Datastar or htmx interactions.
+
+#### Hurl
+```hurl
+# tests/todos.hurl
+POST http://localhost:3001/todos
+Origin: http://localhost:3001
+[FormParams]
+title: milk
+HTTP 302
+
+GET http://localhost:3001/todos
+HTTP 200
+[Asserts]
+body contains "milk"
+```
+```bash
+DATA_DIR=$(mktemp -d) PORT=3001 nerack &
+hurl --test tests/*.hurl
+```
+
+#### Playwright
+```js
+// playwright.config.js
+import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  testDir: 'tests',
+  use: { baseURL: 'http://localhost:3001' },
+  webServer: {
+    command: 'DATA_DIR=$(mktemp -d) PORT=3001 nerack',
+    url: 'http://localhost:3001',
+  },
+});
+```
+```js
+// tests/todos.spec.js
+import { test, expect } from '@playwright/test';
+
+test('adding a todo shows it without a reload', async ({ page }) => {
+  await page.goto('/todos');
+  await page.getByPlaceholder('new todo').fill('milk');
+  await page.getByRole('button', { name: 'add' }).click();
+  await expect(page.locator('#todos')).toContainText('milk');
+});
+```
+```bash
+npx playwright test
+```
+
+### Deployment
+`nerack` always runs in dev mode. For production, `nerack build` compiles the app into `./prod` as a single, fully optimized Linux binary with all of its modules and assets embedded. It carries no compiler, file watcher, `/__dev__`, or language server.
+```bash
+nerack build
+```
+
+`nerack docker` packages the same build as a Docker image, also in `./prod`, along with a `compose.yml` for it. The image sets `DATA_DIR=/data` and declares it a volume.
+```bash
+nerack docker
+```
+```yaml
+services:
+  app:
+    image: myapp
+    ports: ["3000:3000"]
+    env_file: .env       # COOKIE_SECRET=..., app settings
+    volumes: ["data:/data"]
+volumes:
+  data:
+```
+
+Nerack does not terminate TLS; place it behind a reverse proxy or load balancer (Nginx, Caddy, AWS ALB) for HTTPS.
+
+One process uses the whole machine, so run one per host; tune its threads with `HTTP_REACTOR_COUNT` and `WORKER_COUNT`. Every setting and its default is listed in [Configuration](./REFERENCE.md#configuration).
+
+### Observability
+Each pipeline step emits OpenTelemetry spans, logs, and errors over OTLP to a collector on localhost at the standard ports. Run SigNoz, Jaeger, or any other OpenTelemetry backend locally and Nerack uses it; if none is found, Nerack logs that and continues. Point it elsewhere with command-line parameters or the standard `OTEL_EXPORTER_OTLP_*` environment variables. No manual instrumentation required.
+
+---
+
+## Built With
+
+| | |
+|---|---|
+| [C](https://en.cppreference.com/w/c) | Language standard |
+| [libuv](https://libuv.org/) | Event loops, async I/O, file watching, shared thread pool |
+| [h2o](https://h2o.examp1e.net/) | HTTP server, used by the `http` protocol module |
+| [Mustach](https://gitlab.com/jobol/mustach) | Templating and string interpolation, used by `html()`/`markdown()` |
+| [Jansson](https://github.com/akheron/jansson) | JSON parsing and generation, used by `json()` and `http_fetch()` |
+| [curl](https://curl.se/) | HTTP client, used by `http_fetch()` |
+| [SQLite](https://sqlite.org/) | Embedded database, used by the `sqlite` module |
+| [microReticulum](https://github.com/attermann/microReticulum) | Reticulum mesh networking stack, used by the `rns` protocol module |
+| [clangd](https://clangd.llvm.org/) | Language server |
+| [LLDB](https://lldb.llvm.org/) | Debugger |
+| [OpenTelemetry](https://opentelemetry.io/) | Traces, logs, errors |
+
+---
+
+## License
+
+Nerack is released under the [MIT License](./LICENSE).
